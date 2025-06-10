@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useCallback, useState } from 'react';
 import { View, Text, NativeModules, Alert, ActivityIndicator, StyleSheet } from 'react-native';
-import { 
+import {
   Camera,
   useCameraDevice,
   useFrameProcessor,
@@ -25,7 +25,6 @@ export default function App() {
   const [barcodeResult, setBarcodeResult] = useState<BarcodeResult | null>(null);
   const [frameCount, setFrameCount] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [hasPermission, setHasPermission] = useState<boolean | null>(null);
 
   // Camera format selection - keep the good logic you had
   const format = useMemo(() => {
@@ -68,6 +67,7 @@ export default function App() {
     return selectedFormat;
   }, [device?.formats, device?.id]);
 
+  // Barcode detection callback - inspired by your reference
   const onBarcodeDetected = useRunOnJS(
     useCallback((result: string) => {
       console.log('🎯 Barcode detected:', result);
@@ -92,27 +92,10 @@ export default function App() {
     []
   );
 
-  const startProcessing = useRunOnJS(
+  const updateFrameCount = useRunOnJS(
     useCallback(() => {
       setFrameCount(prev => prev + 1);
-      setIsProcessing(true);
     }, []),
-    []
-  );
-
-  // Process frame data on JS thread (can't call native modules from worklet)
-  const processFrameOnJS = useRunOnJS(
-    useCallback((base64: string, width: number, height: number, orientation: string) => {
-      console.log('🔄 Processing on JS thread...');
-      
-      MLKitBarcodeScanner.processFrame(base64, width, height, orientation)
-        .then((result) => {
-          onBarcodeDetected(result);
-        })
-        .catch((error) => {
-          onProcessingError(error.message || 'Unknown error');
-        });
-    }, [onBarcodeDetected, onProcessingError]),
     []
   );
 
@@ -121,18 +104,17 @@ export default function App() {
     'worklet';
     
     // Simple throttling - process every 30 frames (roughly 2fps at 60fps)
-    // But we need to track this properly in the worklet
-    
+    if (frameCount % 30 !== 0) {
+      return;
+    }
+
     // Skip if already processing
     if (isProcessing) {
       return;
     }
 
-    // Simple frame counter-based throttling
-    // Process every 30th frame approximately
-    if (Math.random() > 0.033) { // Roughly 1 in 30 frames (3.3%)
-      return;
-    }
+    setIsProcessing(true);
+    updateFrameCount();
 
     console.log('🔄 Processing frame:', frame.width, 'x', frame.height);
 
@@ -144,20 +126,29 @@ export default function App() {
       if (cropResult && typeof cropResult.base64 === 'string') {
         console.log('🔄 Sending to ML Kit...');
         
-        // Update state that we're processing
-        startProcessing();
-        
-        // Process the frame on JS thread (not in worklet)
-        processFrameOnJS(cropResult.base64, frame.width, frame.height, frame.orientation);
+        // Process the frame
+        MLKitBarcodeScanner.processFrame(
+          cropResult.base64, 
+          frame.width, 
+          frame.height, 
+          frame.orientation
+        )
+        .then((result) => {
+          onBarcodeDetected(result);
+        })
+        .catch((error) => {
+          onProcessingError(error.message || 'Unknown error');
+        });
       } else {
         console.log('🔄 No valid crop result');
+        setIsProcessing(false);
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error('🔄 Frame processor error:', errorMsg);
       onProcessingError(errorMsg);
     }
-  }, [isProcessing, startProcessing, processFrameOnJS, onProcessingError]);
+  }, [frameCount, isProcessing, onBarcodeDetected, onProcessingError, updateFrameCount]);
 
   useEffect(() => {
     (async () => {
